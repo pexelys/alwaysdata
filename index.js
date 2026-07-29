@@ -60,7 +60,7 @@ main.listen(PORT, '0.0.0.0', () => {
   // POST /api/payments/scan já existe no EdgeOne para isto; só faltava
   // algo a chamá-lo periodicamente. Reaproveita o mesmo processo Node
   // sempre-ligado do Render que já faz o keep-alive acima.
-  const scanApiUrl = process.env.PIXGO_API_URL;
+  const scanApiUrl = (process.env.PIXGO_API_URL || '').replace(/\/api\/?$/, '').replace(/\/$/, '');
   const scanApiKey = process.env.ADMIN_API_KEY_MASTER;
 
   if (scanApiUrl && scanApiKey) {
