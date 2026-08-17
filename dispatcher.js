@@ -598,6 +598,21 @@ app.get('/health', (_, res) => {
   });
 });
 
+// ── GET /ads-ping ─────────────────────────────────────────────────────────────
+// Sonda de rede usada pelo AdblockGuard (frontend web) — antes batia em
+// GET /api/ads/status EdgeOne, que tem limite de requests; aqui não tem
+// (Render só limita banda, e isto é só um GIF de 42 bytes). Sem lógica
+// nenhuma, sem auth, sem tocar em nada do EdgeOne — só confirma que a
+// rede/DNS até este domínio está a passar. CORS aberto de propósito (rota
+// pública, chamada direto do browser de qualquer utilizador do site).
+app.get('/ads-ping', (req, res) => {
+  res.setHeader('Access-Control-Allow-Origin', req.headers.origin || '*');
+  res.setHeader('Cache-Control', 'no-store, no-cache');
+  const pixel = Buffer.from('R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7', 'base64');
+  res.setHeader('Content-Type', 'image/gif');
+  res.end(pixel);
+});
+
 // ── Keep-alive — evita que o Render (free tier) adormeça ────────────────────
 function startKeepAlive(port) {
   const interval  = 14 * 60 * 1000; // 14 minutos
