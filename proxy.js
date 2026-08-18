@@ -20,7 +20,7 @@
 //   GITHUB_TOKEN   — PAT com scope: repo
 //   GITHUB_OWNER   — username da conta storage
 //   GITHUB_REPO    — repo de storage
-//   ALLOWED_ORIGIN — origem permitida (ex: https://pixgo.frii.site ou *)
+//   ALLOWED_ORIGIN — origem permitida (ex: https://pixgo.qzz.io ou *)
 //   PORT           — porta (Render injeta automaticamente)
 // ─────────────────────────────────────────────────────────────────────────────
 
