@@ -606,6 +606,7 @@ app.get('/health', (_, res) => {
 // rede/DNS até este domínio está a passar. CORS aberto de propósito (rota
 // pública, chamada direto do browser de qualquer utilizador do site).
 app.get('/ads-ping', (req, res) => {
+  console.log(`[ads-ping] hit → ${new Date().toISOString()} origin=${req.headers.origin || '(none)'}`);
   res.setHeader('Access-Control-Allow-Origin', req.headers.origin || '*');
   res.setHeader('Cache-Control', 'no-store, no-cache');
   const pixel = Buffer.from('R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7', 'base64');
