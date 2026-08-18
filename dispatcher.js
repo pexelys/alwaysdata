@@ -79,7 +79,7 @@ app.use((req, res, next) => {
   const allowed = [
     'https://streamvault-admin.pages.dev',
     'https://pixgo.qzz.io',
-    'https://digital.pixgo.frii.site',
+    'https://digital.pixgo.qzz.io',
     'https://cold-brook-4c20.sheltonnaem.workers.dev',
   ];
   const origin = req.headers.origin || '';
