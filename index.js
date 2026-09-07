@@ -53,39 +53,11 @@ main.listen(PORT, '0.0.0.0', () => {
     console.log(`  keep-alive → ${selfUrl}`);
   }
 
-  // FIX: scanner automático de pagamentos pendentes.
-  // Sem isto, um pagamento só confirma se o utilizador ficar com a aba do
-  // QR code aberta (polling em GET /api/payments/status/:id) — se fechar
-  // a aba depois de enviar o USDT, a assinatura nunca activava sozinha.
-  // POST /api/payments/scan já existe no EdgeOne para isto; só faltava
-  // algo a chamá-lo periodicamente. Reaproveita o mesmo processo Node
-  // sempre-ligado do Render que já faz o keep-alive acima.
-  const scanApiUrl = (process.env.PIXGO_API_URL || '').replace(/\/api\/?$/, '').replace(/\/$/, '');
-  const scanApiKey = process.env.ADMIN_API_KEY_MASTER;
-
-  if (scanApiUrl && scanApiKey) {
-    const scanIntervalMs = parseInt(process.env.PAYMENT_SCAN_INTERVAL_MS || '', 10) || 5 * 60 * 1000;
-
-    setInterval(async () => {
-      try {
-        const res = await fetch(`${scanApiUrl}/api/payments/scan`, {
-          method:  'POST',
-          headers: { 'x-api-key': scanApiKey },
-          signal:  AbortSignal.timeout(20_000),
-        });
-        const data = await res.json().catch(() => ({}));
-        if (!res.ok) {
-          console.warn(`[payment-scan] respondeu ${res.status}:`, data);
-        } else if (data.confirmed > 0 || data.errors > 0) {
-          console.log(`[payment-scan] scanned=${data.scanned} confirmed=${data.confirmed} expired=${data.expired} errors=${data.errors}`);
-        }
-      } catch (e) {
-        console.warn(`[payment-scan] falhou: ${e.message}`);
-      }
-    }, scanIntervalMs);
-
-    console.log(`  payment-scan → ${scanApiUrl}/api/payments/scan (a cada ${scanIntervalMs / 1000}s)`);
-  } else {
-    console.warn('[payment-scan] PIXGO_API_URL e/ou ADMIN_API_KEY_MASTER não definidos — scanner automático DESLIGADO (pagamentos só confirmam com a aba do QR aberta)');
-  }
+  // REMOVIDO (confirmado pelo utilizador): scanner automático de pagamentos
+  // USDT/Polygon pendentes. Fazia sentido só na forma antiga de pagamento
+  // (QR code + confirmação on-chain) — migração completa para Hotmart torna
+  // isto obsoleto; POST /api/payments/scan já nem existe mais no EdgeOne
+  // (removido do routes/payments.js na limpeza de cripto). Deixar este
+  // setInterval ligado só batia num endpoint morto a cada 5min sem propósito
+  // nenhum. keep-alive acima continua igual — não mexido.
 });
