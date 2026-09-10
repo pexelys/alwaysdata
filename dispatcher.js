@@ -1,4 +1,15 @@
-// dispatcher.js – StreamVault Dispatcher v2.4
+// dispatcher.js – StreamVault Dispatcher v2.5
+//
+// FIX v2.5 (bug real do incidente do lote D, 10/09): /parent-status
+// dependia de dados só preenchidos quando um filho reportava via
+// /webhook (até 45min depois de disparado) — o job PAI podia resolver
+// bem antes disso (garantido em ≤50min, timeout-minutes:45 do próprio
+// workflow), fazendo finished=true disparar prematuramente com filhos
+// genuinamente ainda em curso. Agora varre o jobStore directamente por
+// parentJob pra saber com certeza quais filhos existem e qual o estado
+// real de cada um — não depende de acumulação via webhook nem de saber
+// de antemão quantos filhos "deveriam" existir. Ver comentário completo
+// em /parent-status abaixo.
 //
 // Gere 2 contas GitHub Actions em round-robin.
 // Substitui apenas o processQueue/processJob do server.js —
@@ -483,6 +494,21 @@ app.post('/dispatch', auth, async (req, res) => {
       inputs,
     });
 
+    // FIX v2.5 (ver /parent-status abaixo): o Coordinator já sabe, ANTES
+    // de disparar o primeiro filho, exactamente quantos filhos no total
+    // vai disparar (len(children), calculado logo após sondar o
+    // torrent). Regista isso no job PAI imediatamente — não espera o
+    // primeiro filho terminar de codificar (até 45min) pra saber esse
+    // número. Puramente informativo agora (a contagem real de "filho
+    // ainda em curso" em /parent-status varre o jobStore directamente
+    // por parentJob, não depende disto) — mas mantém a UI/depuração
+    // com o total certo desde o primeiro instante.
+    if (parent_job && jobStore.has(parent_job)) {
+      const parent = jobStore.get(parent_job);
+      const t = Number(batch_total) || 0;
+      if (t > 0) parent.batchTotal = t;
+    }
+
     console.log(`[DISPATCH] ✓ job=${job_id} → ${account.owner}/${account.repo} (active=${account.activeJobs}) uploader=${isUploader}${parent_job ? ` filho-de=${parent_job}` : ''} thumb=${thumbnail_url ? '✓' : '—'}`);
 
     res.json({
@@ -590,13 +616,31 @@ app.post('/webhook', async (req, res) => {
   res.json({ ok: true });
 });
 
-// ── GET /parent-status/:jobId — job (pai) + filhos rastreados já terminaram? ──
+// ── GET /parent-status/:jobId — job (pai) + filhos DE FACTO já terminaram? ──
 // Usado pelo worker Cloudflare dos lotes C/D: só libera o próximo título
-// da fila quando o job desta submissão — E, se ele tiver disparado um
-// Coordinator com filhos, TODOS os filhos rastreados — já resolveram
-// (done/failed/cancelled). Se o job nunca teve filhos (submissão que não
-// passou pelo Coordinator — dorama, filme, ou série via link directo por
-// episódio), children_total fica 0 e finished depende só do próprio job.
+// da fila quando isto devolver finished=true.
+//
+// FIX v2.5 (correção de um bug real — ver histórico do incidente do
+// lote D em 10/09): a versão anterior deste endpoint dependia de
+// job.batchTotal + job.uploaderResults, ambos só preenchidos quando um
+// FILHO reporta via /webhook — ou seja, só depois de ELE PRÓPRIO
+// terminar (até 45min). Isso criava uma janela em que o job PAI (o
+// Coordinator) já tinha resolvido — coisa garantida em ≤50min, já que
+// o Coordinator corre DENTRO do mesmo job com timeout-minutes:45 — mas
+// nenhum filho tinha reportado ainda, então children_total ficava 0,
+// children_all_done caía no "vacuously true", e finished virava true
+// PREMATURAMENTE, com filhos genuinamente ainda em curso.
+//
+// Fix: em vez de confiar em contagens acumuladas por webhook, varre o
+// jobStore directamente por parentJob === este job — isso enxerga TODO
+// filho já disparado (via /dispatch, que já grava parentJob na hora),
+// incluindo os que ainda estão 'dispatched' (em curso) e não reportaram
+// nada ainda. "Terminado de facto" = job pai resolvido E nenhum filho
+// disparado continua em estado não-terminal. Não depende de saber de
+// antemão quantos filhos "deveriam" existir — se o Coordinator morreu
+// no meio do loop antes de disparar todos, os que já foram disparados
+// ainda são rastreados correctamente, e os que nunca chegaram a
+// disparar não bloqueiam nada (nunca vão existir mesmo).
 app.get('/parent-status/:jobId', auth, (req, res) => {
   const job = jobStore.get(req.params.jobId);
   if (!job) {
@@ -606,21 +650,30 @@ app.get('/parent-status/:jobId', auth, (req, res) => {
   const TERMINAL = ['done', 'failed', 'cancelled', 'dispatch_error'];
   const ownFinished = TERMINAL.includes(job.status);
 
-  const totalChildren = job.batchTotal || 0;
-  const results       = job.uploaderResults || {};
-  const completedChildren = Object.values(results)
-    .filter(s => s === 'done' || s === 'failed').length;
-  const childrenAllDone = totalChildren > 0 ? completedChildren >= totalChildren : true;
+  const children = [];
+  for (const [childId, childJob] of jobStore.entries()) {
+    if (childJob.parentJob === req.params.jobId) {
+      children.push({ job_id: childId, status: childJob.status });
+    }
+  }
+  const stillRunning = children.filter(c => !TERMINAL.includes(c.status));
+  const resolved     = children.filter(c => TERMINAL.includes(c.status));
+
+  // batchTotal é só informativo (mostra "3/5" antes dos 5 existirem de
+  // facto no jobStore) — nunca decide sozinho se está terminado.
+  const expectedTotal = job.batchTotal || children.length;
 
   res.json({
-    job_id:             req.params.jobId,
-    status:             job.status,
-    own_finished:       ownFinished,
-    has_children:       totalChildren > 0,
-    children_total:     totalChildren,
-    children_completed: completedChildren,
-    children_all_done:  childrenAllDone,
-    finished:           ownFinished && childrenAllDone,
+    job_id:               req.params.jobId,
+    status:               job.status,
+    own_finished:         ownFinished,
+    has_children:         children.length > 0 || expectedTotal > 0,
+    children_total:       expectedTotal,
+    children_dispatched:  children.length,
+    children_completed:   resolved.length,
+    children_still_running: stillRunning.length,
+    children_all_done:    stillRunning.length === 0,
+    finished:             ownFinished && stillRunning.length === 0,
   });
 });
 
