@@ -181,9 +181,22 @@ function loadAccounts() {
 }
 
 const accounts = loadAccounts();
+// CIRÚRGICO: NUNCA process.exit() aqui. Este módulo é importado junto
+// com o dispatcher.js antigo e o polygon dentro do MESMO processo Node
+// (index.js) — um exit() ao nível do módulo mataria o servidor inteiro
+// (incluindo o fluxo antigo, já em produção) só porque as envs GH_
+// ACCOUNT_YT_*_OWNER/_REPO ainda não foram configuradas neste serviço.
+// Em vez disso, fica sem contas e cada rota que precisa delas responde
+// 503 com uma mensagem clara — o resto do processo (dispatcher antigo,
+// polygon) continua de pé normalmente.
 if (accounts.length === 0) {
-  console.error('ERRO: Nenhuma conta GitHub configurada.');
-  process.exit(1);
+  console.error('[dispatcher-novo] AVISO: nenhuma conta GH_ACCOUNT_YT_*_OWNER/_REPO configurada — rotas /dlp/dispatch e /dlp/shard-delete vão responder 503 até isso ser corrigido. O resto do serviço (dispatcher antigo, polygon) não é afectado.');
+}
+
+function requireAccounts(res) {
+  if (accounts.length > 0) return true;
+  res.status(503).json({ error: 'dispatcher-novo sem contas GitHub configuradas (GH_ACCOUNT_YT_1_OWNER/_REPO em falta)' });
+  return false;
 }
 
 // ── Round-robin — conta com menos jobs activos, desempate por lastUsed ───────
@@ -363,6 +376,7 @@ app.post('/dlp/dispatch', auth, async (req, res) => {
   } = req.body;
 
   if (!job_id) return res.status(400).json({ error: 'job_id obrigatório' });
+  if (!requireAccounts(res)) return;
 
   if (jobStore.has(job_id)) {
     const existing = jobStore.get(job_id);
@@ -465,6 +479,7 @@ app.post('/dlp/shard-delete', auth, async (req, res) => {
   if (!job_id || !shard_repo) {
     return res.status(400).json({ error: 'job_id e shard_repo são obrigatórios' });
   }
+  if (!requireAccounts(res)) return;
 
   const account = selectAccount();
   const inputs  = { job_id, shard_repo };
