@@ -2,8 +2,9 @@
 // Importa os 3 apps, monta-os num único Express na porta do Render.
 // Cada ficheiro exporta a sua app/server sem chamar .listen().
 import express from 'express';
-import { app as polygonApp }    from './server.js';
-import { app as dispatcherApp } from './dispatcher.js';
+import { app as polygonApp }      from './server.js';
+import { app as dispatcherApp }   from './dispatcher.js';
+import { app as dispatcherNovoApp } from './dispatcher-novo.js';
 
 // FIX: proxy.js desligado — Cloudflare redireciona /{jobId}/... directamente
 // para a Release pública do GitHub (Single Redirects), sem passar pelo Render.
@@ -22,6 +23,10 @@ const main = express();
 // browser bloqueia (ERR_FAILED 200 OK com "No Access-Control-Allow-Origin").
 main.use(dispatcherApp);
 
+// dispatcher-novo (fluxo yt-dlp) — rotas já vêm com prefixo /dlp/* dentro
+// do próprio módulo, então não colide com nada do dispatcherApp antigo.
+main.use(dispatcherNovoApp);
+
 // Polygon a seguir — define /polygon/*, /tron/* (prefixos completos internos).
 main.use(polygonApp);
 
@@ -34,6 +39,7 @@ main.listen(PORT, '0.0.0.0', () => {
   console.log(`[index] servidor unificado na porta ${PORT}`);
   console.log(`  /polygon/* /tron/*              → polygon-microservice`);
   console.log(`  /dispatch /webhook /jobs /status → dispatcher`);
+  console.log(`  /dlp/*                           → dispatcher-novo (yt-dlp)`);
   console.log(`  /*                               → 404 (proxy desligado)`);
 
   // Keep-alive unificado
