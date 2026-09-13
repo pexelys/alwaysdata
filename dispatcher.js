@@ -1,54 +1,30 @@
 // dispatcher.js – StreamVault Dispatcher v2.5
 //
-// FIX v2.5 (bug real do incidente do lote D, 10/09): /parent-status
-// dependia de dados só preenchidos quando um filho reportava via
-// /webhook (até 45min depois de disparado) — o job PAI podia resolver
-// bem antes disso (garantido em ≤50min, timeout-minutes:45 do próprio
-// workflow), fazendo finished=true disparar prematuramente com filhos
-// genuinamente ainda em curso. Agora varre o jobStore directamente por
-// parentJob pra saber com certeza quais filhos existem e qual o estado
-// real de cada um — não depende de acumulação via webhook nem de saber
-// de antemão quantos filhos "deveriam" existir. Ver comentário completo
-// em /parent-status abaixo.
-//
 // Gere 2 contas GitHub Actions em round-robin.
 // Substitui apenas o processQueue/processJob do server.js —
 // todas as rotas e lógica do server.js ficam intactas.
 //
-// FIX v2.4 (visibilidade de filhos do Coordinator — lotes C/D):
-//   • Antes, o Coordinator do process-leve.yml disparava os episódios
-//     filhos direto na API do GitHub (usando o GITHUB_TOKEN automático
-//     do próprio job) — o dispatcher.js nunca sabia que esses jobs
-//     existiam. Isso impedia qualquer coisa a montante (ex.: um novo
-//     lote C/D para séries/animes, com a regra "só dispara o próximo
-//     título quando o anterior já concluiu de facto") de saber quando
-//     um título com vários episódios estava realmente terminado — só
-//     via o job "pai" (o Coordinator) reportar "done", o que acontece
-//     assim que ele TERMINA DE DISPARAR os filhos, não quando eles de
-//     facto acabam de codificar.
-//   • Agora o Coordinator passa a chamar ESTE dispatcher (POST /dispatch)
-//     pra cada filho, com dois campos novos no corpo:
-//       parent_job  — job_id do Coordinator pai
-//       batch_total — quantos filhos o pai espera no total
-//     Cada filho ganha entrada própria no jobStore (herda round-robin
-//     de conta + jitter anti-rajada da DispatchQueue, que antes só
-//     protegia chamadas vindas do server.js/worker).
-//   • /webhook (chamado pelo PRÓPRIO filho ao terminar) generaliza o
-//     mecanismo que já existia só para "uploaders" (parent_job +
-//     uploaderResults) — agora usa batch_total explícito do corpo do
-//     webhook quando presente (caso do Coordinator), com fallback pro
-//     comportamento antigo (metadata.batch_count) pros uploaders de
-//     sempre. Falhados também contam como "resolvidos" na contagem —
-//     um episódio falho não deve travar pra sempre a detecção de "pai
-//     concluído".
-//   • Novo endpoint GET /parent-status/:jobId — devolve se um job (e,
-//     se aplicável, todos os seus filhos rastreados) já terminou. É
-//     este endpoint que o worker Cloudflare dos lotes C/D consulta a
-//     cada minuto pra decidir se pode liberar o próximo título da fila.
+// FIX v2.5 (lotes C/D — novo endpoint, sem tocar no Coordinator):
+//   • Novo endpoint GET /parent-status/:jobId — devolve se um job já
+//     terminou (done/failed/cancelled). É isto que o worker Cloudflare
+//     dos lotes C/D consulta a cada minuto pra decidir se pode avançar
+//     pro próximo título da fila. Não rastreia filhos nem depende de
+//     nada novo — só olha pro próprio job.status, que já existe.
 //   • /dispatch também aceita (e propaga como input do workflow)
-//     episode_count — usado pelo Coordinator pra numerar
-//     deterministicamente quando 1 link cobre N episódios (ver
-//     process-leve.yml, fix 9c).
+//     episode_count — usado pelo Coordinator (process-leve.yml) pra
+//     numerar deterministicamente quando 1 link/torrent cobre N
+//     episódios. Cálculo 100% local do lado do Coordinator; aqui só
+//     passa o valor adiante.
+//   • O Coordinator (process-leve.yml) continua a disparar os episódios
+//     filhos DIRETO na API do GitHub, exactamente como sempre foi —
+//     nenhuma chamada a este dispatcher no meio disso. O que mudou pra
+//     resolver o "só avança o lote quando o anterior concluiu" foi o
+//     Coordinator passar a ter o seu PRÓPRIO job/timeout (8h) no
+//     workflow, separado do job de encode (45min, inalterado) — ver
+//     process-leve.yml. Como o Coordinator agora sempre resolve dentro
+//     desse teto, o /parent-status simples (só olhar status do job)
+//     já é suficiente; não precisa de o dispatcher saber nada sobre
+//     quantos episódios existem.
 //
 // FIX v2.3 (jitter + retry na chamada de dispatch ao GitHub):
 //   • O sistema de lotes/espaçamento que já existe a montante (server.js
@@ -421,13 +397,9 @@ app.post('/dispatch', auth, async (req, res) => {
     episode_number    = '0',
     episode_title     = '',
     file_indices      = '',
+    // Usado só pelo Coordinator (process-leve.yml) pra numerar quando
+    // 1 link/torrent cobre N episódios.
     episode_count     = '1',
-    // v2.4 — presentes só quando quem chama é o Coordinator dispatando um
-    // filho (ver process-leve.yml). parent_job é ecoado no jobStore desta
-    // entrada só para exibição/depuração; o vínculo real de conclusão é
-    // feito no /webhook, quando o PRÓPRIO filho reporta o fim.
-    parent_job        = '',
-    batch_total       = '',
   } = req.body;
 
   if (!job_id) return res.status(400).json({ error: 'job_id obrigatório' });
@@ -449,24 +421,68 @@ app.post('/dispatch', auth, async (req, res) => {
 
   const account = selectAccount();
 
-  const inputs = {
-    job_id,
-    video_url,
-    thumbnail_url,
-    seg_duration:      String(seg_duration),
-    max_encode_height: String(max_encode_height),
-    metadata: typeof metadata === 'string' ? metadata : JSON.stringify(metadata),
-    season_number:     String(season_number),
-    episode_number:    String(episode_number),
-    episode_title,
-    file_indices,
-    episode_count: String(episode_count),
-    parent_job,
-    batch_total: String(batch_total || ''),
-  };
-
-  const isUploader   = isUploaderJob(inputs);
+  // FIX v2.6 — ACHADO CRÍTICO: workflow_dispatch tem um limite RÍGIDO de
+  // 10 inputs (validado pelo próprio GitHub — acima disso o workflow
+  // inteiro fica inválido e nunca é registado). Já estávamos em 11
+  // campos separados (job_id, video_url, thumbnail_url, seg_duration,
+  // max_encode_height, metadata, season_number, episode_number,
+  // episode_title, file_indices, episode_count) sem que ninguém tivesse
+  // reparado — bug real, só descoberto ao planear mais 2 campos novos
+  // (remaining_children/chain_root_id) pra funcionalidade seguinte.
+  //
+  // Fix: consolidar em 6 inputs — job_id, video_url e metadata ficam
+  // como estavam; os restantes agrupam-se em 3 blobs JSON por afinidade:
+  //   episode_info -> { season_number, episode_number, episode_title,
+  //                      file_indices, episode_count }
+  //   encode_opts  -> { seg_duration, max_encode_height, thumbnail_url }
+  //   chain        -> { remaining_children, chain_root_id } — usado só
+  //                    pela cadeia sequencial de episódios (ver
+  //                    process-leve.yml); aqui vai sempre vazio, porque
+  //                    é o dispatcher.js que dá início a um título novo,
+  //                    nunca a um elo intermédio da cadeia (esses são
+  //                    disparados directo pela API do GitHub, dentro do
+  //                    próprio workflow, sem passar por aqui).
+  //
+  // isUploaderJob() continua a usar os campos FLAT do req.body (video_url
+  // e file_indices) — não o `inputs` consolidado abaixo, que já não tem
+  // file_indices num campo próprio.
+  const isUploader   = isUploaderJob({ video_url, file_indices, metadata });
   const workflowFile = isUploader ? UPLOADER_FILE : WORKFLOW_FILE;
+
+  const inputs = isUploader
+    // Uploader é um workflow diferente (UPLOADER_FILE), com o seu
+    // próprio schema de inputs — não sofre o limite de 10 do
+    // process-leve.yml, mantido tal como estava.
+    ? {
+        job_id,
+        video_url,
+        thumbnail_url,
+        seg_duration:      String(seg_duration),
+        max_encode_height: String(max_encode_height),
+        metadata: typeof metadata === 'string' ? metadata : JSON.stringify(metadata),
+        season_number:     String(season_number),
+        episode_number:    String(episode_number),
+        episode_title,
+        file_indices,
+      }
+    : {
+        job_id,
+        video_url,
+        metadata: typeof metadata === 'string' ? metadata : JSON.stringify(metadata),
+        episode_info: JSON.stringify({
+          season_number:  String(season_number),
+          episode_number: String(episode_number),
+          episode_title,
+          file_indices,
+          episode_count: String(episode_count),
+        }),
+        encode_opts: JSON.stringify({
+          seg_duration:      String(seg_duration),
+          max_encode_height: String(max_encode_height),
+          thumbnail_url,
+        }),
+        chain: JSON.stringify({ remaining_children: [], chain_root_id: '' }),
+      };
 
   try {
     const r = await triggerWorkflowWithRetry(account, workflowFile, inputs);
@@ -490,26 +506,10 @@ app.post('/dispatch', auth, async (req, res) => {
       status:       'dispatched',
       dispatchedAt: new Date().toISOString(),
       isUploader,
-      parentJob:    parent_job || null,
       inputs,
     });
 
-    // FIX v2.5 (ver /parent-status abaixo): o Coordinator já sabe, ANTES
-    // de disparar o primeiro filho, exactamente quantos filhos no total
-    // vai disparar (len(children), calculado logo após sondar o
-    // torrent). Regista isso no job PAI imediatamente — não espera o
-    // primeiro filho terminar de codificar (até 45min) pra saber esse
-    // número. Puramente informativo agora (a contagem real de "filho
-    // ainda em curso" em /parent-status varre o jobStore directamente
-    // por parentJob, não depende disto) — mas mantém a UI/depuração
-    // com o total certo desde o primeiro instante.
-    if (parent_job && jobStore.has(parent_job)) {
-      const parent = jobStore.get(parent_job);
-      const t = Number(batch_total) || 0;
-      if (t > 0) parent.batchTotal = t;
-    }
-
-    console.log(`[DISPATCH] ✓ job=${job_id} → ${account.owner}/${account.repo} (active=${account.activeJobs}) uploader=${isUploader}${parent_job ? ` filho-de=${parent_job}` : ''} thumb=${thumbnail_url ? '✓' : '—'}`);
+    console.log(`[DISPATCH] ✓ job=${job_id} → ${account.owner}/${account.repo} (active=${account.activeJobs}) uploader=${isUploader} thumb=${thumbnail_url ? '✓' : '—'}`);
 
     res.json({
       ok: true,
@@ -559,21 +559,15 @@ app.post('/shard-delete', auth, async (req, res) => {
 });
 
 // ── POST /webhook — callback do Actions quando job termina ───────────────────
-// FIX v2.4: batch_total agora pode vir explícito no corpo (caso do
-// Coordinator de episódios) — tem prioridade sobre o cálculo antigo via
-// metadata.batch_count (mantido só como fallback, usado pelos uploaders
-// de sempre, que nunca mandavam esse campo). 'failed' também conta como
-// filho "resolvido" na contagem — um episódio que falhou não deve travar
-// pra sempre a detecção de "pai concluído" (ver /parent-status abaixo).
 app.post('/webhook', async (req, res) => {
-  const { job_id, status, parent_job, batch_total } = req.body;
+  const { job_id, status, parent_job } = req.body;
 
   if (!job_id) return res.status(400).json({ error: 'job_id obrigatório' });
 
   const job = jobStore.get(job_id);
 
   if (!job) {
-    console.log(`[WEBHOOK] Job ${job_id} não encontrado no store (uploader/episódio filho?)`);
+    console.log(`[WEBHOOK] Job ${job_id} não encontrado no store (uploader filho?)`);
     return res.status(404).json({ error: 'Job não encontrado', job_id });
   }
 
@@ -591,56 +585,37 @@ app.post('/webhook', async (req, res) => {
     if (!parent.uploaderResults) parent.uploaderResults = {};
     parent.uploaderResults[job_id] = status || 'done';
 
-    const explicitTotal = Number(batch_total) || 0;
-    if (explicitTotal > 0) {
-      parent.batchTotal = explicitTotal;
-    } else if (!parent.batchTotal) {
-      parent.batchTotal = parent.inputs?.metadata
-        ? (() => {
-            try {
-              const m = JSON.parse(parent.inputs.metadata);
-              return m.batch_count || 0;
-            } catch { return 0; }
-          })()
-        : 0;
-    }
+    const totalUploaders = parent.inputs?.metadata
+      ? (() => {
+          try {
+            const m = JSON.parse(parent.inputs.metadata);
+            return m.batch_count || 0;
+          } catch { return 0; }
+        })()
+      : 0;
 
-    const totalChildren     = parent.batchTotal || 0;
-    const completedChildren = Object.values(parent.uploaderResults)
-      .filter(s => s === 'done' || s === 'failed').length;
+    const completedUploaders = Object.values(parent.uploaderResults).filter(s => s === 'done').length;
 
-    console.log(`[WEBHOOK] Filho ${job_id} → ${status} (parent: ${parent_job} ${completedChildren}/${totalChildren || '?'})`);
+    console.log(`[WEBHOOK] Uploader ${job_id} → ${status} (parent: ${parent_job} ${completedUploaders}/${totalUploaders})`);
   }
 
   console.log(`[WEBHOOK] job=${job_id} status=${status} conta=${account?.owner} active=${account?.activeJobs}`);
   res.json({ ok: true });
 });
 
-// ── GET /parent-status/:jobId — job (pai) + filhos DE FACTO já terminaram? ──
+// ── GET /parent-status/:jobId — este job já terminou? ────────────────────────
 // Usado pelo worker Cloudflare dos lotes C/D: só libera o próximo título
-// da fila quando isto devolver finished=true.
-//
-// FIX v2.5 (correção de um bug real — ver histórico do incidente do
-// lote D em 10/09): a versão anterior deste endpoint dependia de
-// job.batchTotal + job.uploaderResults, ambos só preenchidos quando um
-// FILHO reporta via /webhook — ou seja, só depois de ELE PRÓPRIO
-// terminar (até 45min). Isso criava uma janela em que o job PAI (o
-// Coordinator) já tinha resolvido — coisa garantida em ≤50min, já que
-// o Coordinator corre DENTRO do mesmo job com timeout-minutes:45 — mas
-// nenhum filho tinha reportado ainda, então children_total ficava 0,
-// children_all_done caía no "vacuously true", e finished virava true
-// PREMATURAMENTE, com filhos genuinamente ainda em curso.
-//
-// Fix: em vez de confiar em contagens acumuladas por webhook, varre o
-// jobStore directamente por parentJob === este job — isso enxerga TODO
-// filho já disparado (via /dispatch, que já grava parentJob na hora),
-// incluindo os que ainda estão 'dispatched' (em curso) e não reportaram
-// nada ainda. "Terminado de facto" = job pai resolvido E nenhum filho
-// disparado continua em estado não-terminal. Não depende de saber de
-// antemão quantos filhos "deveriam" existir — se o Coordinator morreu
-// no meio do loop antes de disparar todos, os que já foram disparados
-// ainda são rastreados correctamente, e os que nunca chegaram a
-// disparar não bloqueiam nada (nunca vão existir mesmo).
+// da fila quando isto devolver finished=true. Desde o fix do
+// process-leve.yml que separa o Coordinator em job próprio (timeout de
+// 8h) do job de encode (45min, inalterado), o "job" aqui É o Coordinator
+// pra títulos série/anime via torrent, ou o job de encode directo pra
+// tudo o resto — em ambos os casos, um job SÓ, com timeout-minutes
+// próprio garantindo que ele SEMPRE resolve (done/failed/cancelled) —
+// nunca fica pendurado pra sempre. Não rastreia filhos: os episódios
+// disparados pelo Coordinator continuam a correr de forma independente
+// depois dele terminar de os disparar, exactamente como sempre
+// funcionou — o lote C/D só precisa saber quando pode avançar pro
+// PRÓXIMO título da fila, não quando cada episódio termina de codificar.
 app.get('/parent-status/:jobId', auth, (req, res) => {
   const job = jobStore.get(req.params.jobId);
   if (!job) {
@@ -648,32 +623,12 @@ app.get('/parent-status/:jobId', auth, (req, res) => {
   }
 
   const TERMINAL = ['done', 'failed', 'cancelled', 'dispatch_error'];
-  const ownFinished = TERMINAL.includes(job.status);
-
-  const children = [];
-  for (const [childId, childJob] of jobStore.entries()) {
-    if (childJob.parentJob === req.params.jobId) {
-      children.push({ job_id: childId, status: childJob.status });
-    }
-  }
-  const stillRunning = children.filter(c => !TERMINAL.includes(c.status));
-  const resolved     = children.filter(c => TERMINAL.includes(c.status));
-
-  // batchTotal é só informativo (mostra "3/5" antes dos 5 existirem de
-  // facto no jobStore) — nunca decide sozinho se está terminado.
-  const expectedTotal = job.batchTotal || children.length;
+  const finished = TERMINAL.includes(job.status);
 
   res.json({
-    job_id:               req.params.jobId,
-    status:               job.status,
-    own_finished:         ownFinished,
-    has_children:         children.length > 0 || expectedTotal > 0,
-    children_total:       expectedTotal,
-    children_dispatched:  children.length,
-    children_completed:   resolved.length,
-    children_still_running: stillRunning.length,
-    children_all_done:    stillRunning.length === 0,
-    finished:             ownFinished && stillRunning.length === 0,
+    job_id:   req.params.jobId,
+    status:   job.status,
+    finished,
   });
 });
 
