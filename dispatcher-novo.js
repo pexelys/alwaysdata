@@ -59,6 +59,7 @@ app.use((req, res, next) => {
     'https://pixgo.qzz.io',
     'https://digital.pixgo.qzz.io',
     'https://cold-brook-4c20.sheltonnaem.workers.dev',
+    'https://winter-river-0200.sheltonnaem.workers.dev', // ingest-novo.js (fluxo yt-dlp)
   ];
   const origin = req.headers.origin || '';
   if (allowed.includes(origin) || !origin) {
