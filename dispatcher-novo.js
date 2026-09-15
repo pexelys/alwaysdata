@@ -51,20 +51,17 @@ import crypto from 'crypto';
 const app = express();
 app.use(express.json({ limit: '1mb' }));
 
-// ── CORS — permite chamadas do painel admin (pages.dev, worker de ingest
-// e domínio próprio) ─────────────────────────────────────────────────────
+// ── CORS — permissivo de propósito. A segurança real deste módulo é o
+// x-api-key (verificado dentro de cada rota via requireAccounts/auth),
+// não o CORS — CORS é só o browser decidir se deixa o JS ler a resposta,
+// nunca impede um cliente não-browser de chamar a rota na mesma. Uma
+// whitelist fixa de subdomínios *.workers.dev é frágil (a Cloudflare
+// pode atribuir um subdomínio novo a cada deploy sem nome fixo), então
+// reflectimos a origem recebida em vez de manter uma lista pra manter
+// sincronizada manualmente. ───────────────────────────────────────────
 app.use((req, res, next) => {
-  const allowed = [
-    'https://streamvault-admin.pages.dev',
-    'https://pixgo.qzz.io',
-    'https://digital.pixgo.qzz.io',
-    'https://cold-brook-4c20.sheltonnaem.workers.dev',
-    'https://winter-river-0200.sheltonnaem.workers.dev', // ingest-novo.js (fluxo yt-dlp)
-  ];
   const origin = req.headers.origin || '';
-  if (allowed.includes(origin) || !origin) {
-    res.setHeader('Access-Control-Allow-Origin', origin || '*');
-  }
+  res.setHeader('Access-Control-Allow-Origin', origin || '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, x-api-key');
   if (req.method === 'OPTIONS') return res.sendStatus(204);
@@ -363,17 +360,7 @@ app.post('/dlp/dispatch', auth, async (req, res) => {
     seg_duration      = '4',
     max_encode_height = '720',
     metadata          = {},
-    season_number     = '0',
-    episode_number    = '0',
-    episode_title     = '',
-    file_indices      = '',
-    episode_count     = '1',
-    // v2.4 — presentes só quando quem chama é o Coordinator dispatando um
-    // filho (ver process-leve.yml). parent_job é ecoado no jobStore desta
-    // entrada só para exibição/depuração; o vínculo real de conclusão é
-    // feito no /webhook, quando o PRÓPRIO filho reporta o fim.
-    parent_job        = '',
-    batch_total       = '',
+    timeout_minutes   = '',
   } = req.body;
 
   if (!job_id) return res.status(400).json({ error: 'job_id obrigatório' });
@@ -396,6 +383,12 @@ app.post('/dlp/dispatch', auth, async (req, res) => {
 
   const account = selectAccount();
 
+  // process-super-leve-dlp.yml não tem Coordinator/episódios — os únicos
+  // inputs que ele declara em workflow_dispatch são estes 7. Mandar
+  // qualquer campo a mais (season_number, parent_job, etc. — herdados do
+  // dispatcher.js antigo) faz a API do GitHub responder 422 "Unexpected
+  // inputs provided", porque workflow_dispatch valida contra o schema
+  // exato declarado no .yml.
   const inputs = {
     job_id,
     video_url,
@@ -403,16 +396,10 @@ app.post('/dlp/dispatch', auth, async (req, res) => {
     seg_duration:      String(seg_duration),
     max_encode_height: String(max_encode_height),
     metadata: typeof metadata === 'string' ? metadata : JSON.stringify(metadata),
-    season_number:     String(season_number),
-    episode_number:    String(episode_number),
-    episode_title,
-    file_indices,
-    episode_count: String(episode_count),
-    parent_job,
-    batch_total: String(batch_total || ''),
+    ...(timeout_minutes ? { timeout_minutes: String(timeout_minutes) } : {}),
   };
 
-  const isUploader   = isUploaderJob(inputs);
+  const isUploader   = isUploaderJob({ ...inputs, metadata });
   const workflowFile = isUploader ? UPLOADER_FILE : WORKFLOW_FILE;
 
   try {
@@ -437,26 +424,10 @@ app.post('/dlp/dispatch', auth, async (req, res) => {
       status:       'dispatched',
       dispatchedAt: new Date().toISOString(),
       isUploader,
-      parentJob:    parent_job || null,
       inputs,
     });
 
-    // FIX v2.5 (ver /parent-status abaixo): o Coordinator já sabe, ANTES
-    // de disparar o primeiro filho, exactamente quantos filhos no total
-    // vai disparar (len(children), calculado logo após sondar o
-    // torrent). Regista isso no job PAI imediatamente — não espera o
-    // primeiro filho terminar de codificar (até 45min) pra saber esse
-    // número. Puramente informativo agora (a contagem real de "filho
-    // ainda em curso" em /parent-status varre o jobStore directamente
-    // por parentJob, não depende disto) — mas mantém a UI/depuração
-    // com o total certo desde o primeiro instante.
-    if (parent_job && jobStore.has(parent_job)) {
-      const parent = jobStore.get(parent_job);
-      const t = Number(batch_total) || 0;
-      if (t > 0) parent.batchTotal = t;
-    }
-
-    console.log(`[DISPATCH] ✓ job=${job_id} → ${account.owner}/${account.repo} (active=${account.activeJobs}) uploader=${isUploader}${parent_job ? ` filho-de=${parent_job}` : ''} thumb=${thumbnail_url ? '✓' : '—'}`);
+    console.log(`[DISPATCH] ✓ job=${job_id} → ${account.owner}/${account.repo} (active=${account.activeJobs}) uploader=${isUploader} thumb=${thumbnail_url ? '✓' : '—'}`);
 
     res.json({
       ok: true,
