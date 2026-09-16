@@ -75,6 +75,39 @@ const SHARD_DELETE_FILE = process.env.GH_SHARD_DELETE_FILE_YT || 'shard-delete.y
 const WORKFLOW_REF      = process.env.GH_WORKFLOW_REF_YT      || 'main';
 const ADMIN_KEY         = process.env.ADMIN_API_KEY_YT        || '';
 
+// ── Notificação directa ao worker do lote F ──────────────────────────────────
+// FIX: o jobStore abaixo vive só em memória (new Map()) — some inteiro se
+// este processo reiniciar/redeployar no Render. O lote-f-worker.js dependia
+// só de sondar GET /dlp/status pra saber "terminou", e se o job já não está
+// mais no jobStore (por restart), ele nunca vê um status terminal — fica
+// preso até o teto de segurança (INFRA_FAILURE_SAFETY_HOURS, horas). Isto
+// notifica o worker directamente no momento exacto em que o /dlp/webhook
+// chega, sem depender do jobStore sobreviver até lá. Se LOTE_F_WORKER_URL
+// não estiver configurada, esta função não faz nada — resto do dispatcher
+// funciona normalmente (feature opcional, fail-open).
+const LOTE_F_WORKER_URL    = process.env.LOTE_F_WORKER_URL    || '';
+const LOTE_F_NOTIFY_SECRET = process.env.LOTE_F_NOTIFY_SECRET || '';
+
+function notifyLoteF(job_id, status) {
+  if (!LOTE_F_WORKER_URL) return; // feature desligada, nada a fazer
+  const url = `${LOTE_F_WORKER_URL.replace(/\/$/, '')}/internal/notify`;
+  // Fire-and-forget — nunca atrasa nem falha a resposta do /dlp/webhook
+  // ao GitHub Actions (que já tem o seu próprio timeout/retry).
+  fetch(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...(LOTE_F_NOTIFY_SECRET ? { 'x-notify-key': LOTE_F_NOTIFY_SECRET } : {}),
+    },
+    body: JSON.stringify({ job_id, status }),
+    signal: AbortSignal.timeout(8000),
+  }).then((r) => {
+    if (!r.ok) console.warn(`[NOTIFY-LOTE-F] job=${job_id} respondeu HTTP ${r.status}`);
+  }).catch((e) => {
+    console.warn(`[NOTIFY-LOTE-F] job=${job_id} falhou: ${e.message} (o poll/teto de segurança do lote F continua como rede de segurança)`);
+  });
+}
+
 // ── Auth via GitHub App (JWT → installation access token) ───────────────────
 // Assina um JWT curto (10min) com a chave privada RS256 da App — usado só
 // pra trocar por um installation access token, nunca usado diretamente
@@ -499,6 +532,10 @@ app.post('/dlp/webhook', async (req, res) => {
   job.status      = status || 'done';
   job.completedAt = new Date().toISOString();
   job.result      = req.body;
+
+  // Avisa o worker do lote F já — não espera o próximo poll dele nem
+  // depende deste jobStore continuar vivo até esse poll chegar.
+  notifyLoteF(job_id, job.status);
 
   const account = accounts.find(a => a.id === job.accountId);
   if (account && account.activeJobs > 0) {
