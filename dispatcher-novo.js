@@ -394,6 +394,15 @@ app.post('/dlp/dispatch', auth, async (req, res) => {
     max_encode_height = '720',
     metadata          = {},
     timeout_minutes   = '',
+    // MISSÃO 1/2 (tipos do process-leve + playlist série/anime): valor
+    // a repassar direto pra --playlist-items do yt-dlp dentro do job.
+    // Vazio (default) = process-super-leve-dlp.yml decide sozinho
+    // (vídeo único pros tipos antigos/movie/documentary/dorama, ou
+    // sonda+decide batch pra series, ou playlist inteira pra anime).
+    // Preenchido = job já é um batch de série com range definido (veio
+    // de um re-enfileiramento no lote F). Puro pass-through — nenhuma
+    // lógica de tipo vive aqui, só dentro do próprio .yml.
+    playlist_items    = '',
   } = req.body;
 
   if (!job_id) return res.status(400).json({ error: 'job_id obrigatório' });
@@ -417,11 +426,12 @@ app.post('/dlp/dispatch', auth, async (req, res) => {
   const account = selectAccount();
 
   // process-super-leve-dlp.yml não tem Coordinator/episódios — os únicos
-  // inputs que ele declara em workflow_dispatch são estes 7. Mandar
-  // qualquer campo a mais (season_number, parent_job, etc. — herdados do
-  // dispatcher.js antigo) faz a API do GitHub responder 422 "Unexpected
-  // inputs provided", porque workflow_dispatch valida contra o schema
-  // exato declarado no .yml.
+  // inputs que ele declara em workflow_dispatch são estes 8 (7 de sempre
+  // + playlist_items, adicionado na ronda "tipos + playlist" pra
+  // series/anime). Mandar qualquer campo a mais (season_number,
+  // parent_job, etc. — herdados do dispatcher.js antigo) faz a API do
+  // GitHub responder 422 "Unexpected inputs provided", porque
+  // workflow_dispatch valida contra o schema exato declarado no .yml.
   const inputs = {
     job_id,
     video_url,
@@ -430,6 +440,7 @@ app.post('/dlp/dispatch', auth, async (req, res) => {
     max_encode_height: String(max_encode_height),
     metadata: typeof metadata === 'string' ? metadata : JSON.stringify(metadata),
     ...(timeout_minutes ? { timeout_minutes: String(timeout_minutes) } : {}),
+    ...(playlist_items ? { playlist_items: String(playlist_items) } : {}),
   };
 
   const isUploader   = isUploaderJob({ ...inputs, metadata });
