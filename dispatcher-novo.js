@@ -403,6 +403,11 @@ app.post('/dlp/dispatch', auth, async (req, res) => {
     // de um re-enfileiramento no lote F). Puro pass-through — nenhuma
     // lógica de tipo vive aqui, só dentro do próprio .yml.
     playlist_items    = '',
+    // Ronda "skip primeiro vídeo": quando 'true', o process-super-
+    // leve-dlp.yml ignora sempre o 1º vídeo da playlist na sondagem —
+    // ele nunca é baixado/processado, e a numeração/batches do resto já
+    // saem sem ele. Puro pass-through, mesma lógica de playlist_items.
+    skip_first_item   = 'false',
   } = req.body;
 
   if (!job_id) return res.status(400).json({ error: 'job_id obrigatório' });
@@ -426,12 +431,13 @@ app.post('/dlp/dispatch', auth, async (req, res) => {
   const account = selectAccount();
 
   // process-super-leve-dlp.yml não tem Coordinator/episódios — os únicos
-  // inputs que ele declara em workflow_dispatch são estes 8 (7 de sempre
-  // + playlist_items, adicionado na ronda "tipos + playlist" pra
-  // series/anime). Mandar qualquer campo a mais (season_number,
-  // parent_job, etc. — herdados do dispatcher.js antigo) faz a API do
-  // GitHub responder 422 "Unexpected inputs provided", porque
-  // workflow_dispatch valida contra o schema exato declarado no .yml.
+  // inputs que ele declara em workflow_dispatch são estes 9 (7 de sempre
+  // + playlist_items + skip_first_item, adicionados na ronda "tipos +
+  // playlist" pra series/anime). Mandar qualquer campo a mais
+  // (season_number, parent_job, etc. — herdados do dispatcher.js antigo)
+  // faz a API do GitHub responder 422 "Unexpected inputs provided",
+  // porque workflow_dispatch valida contra o schema exato declarado no
+  // .yml.
   const inputs = {
     job_id,
     video_url,
@@ -441,6 +447,7 @@ app.post('/dlp/dispatch', auth, async (req, res) => {
     metadata: typeof metadata === 'string' ? metadata : JSON.stringify(metadata),
     ...(timeout_minutes ? { timeout_minutes: String(timeout_minutes) } : {}),
     ...(playlist_items ? { playlist_items: String(playlist_items) } : {}),
+    ...(skip_first_item ? { skip_first_item: String(skip_first_item) } : {}),
   };
 
   const isUploader   = isUploaderJob({ ...inputs, metadata });
