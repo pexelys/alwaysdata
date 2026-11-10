@@ -1,53 +1,23 @@
 services:
   - type: web
-    name: alwaysdata
+    name: alwaysdata            # nome do serviço existente, mantido
     runtime: docker
     region: oregon
     plan: free
     healthCheckPath: /health
     envVars:
-      # polygon-microservice
-      - key: WALLET_MNEMONIC
-        sync: false
-      - key: POLYGON_SERVICE_SECRET
-        sync: false
-      - key: POLYGON_RPC_URL
-        value: https://polygon-rpc.com
-      - key: POLYGON_CHAIN_ID
-        value: "137"
-      - key: POLYGONSCAN_API_KEY
-        sync: false
-      - key: USDT_CONTRACT
-        value: "0xc2132D05D31c914a87C6611C10748AEb04B58e8F"
-      # streamvault-dispatcher
       - key: ADMIN_API_KEY
         sync: false
       - key: GH_WORKFLOW_FILE
         value: process.yml
       - key: GH_WORKFLOW_REF
         value: main
-      - key: GH_ACCOUNT_1_TOKEN
-        sync: false
       - key: GH_ACCOUNT_1_OWNER
         sync: false
       - key: GH_ACCOUNT_1_REPO
         sync: false
-      - key: GH_ACCOUNT_2_TOKEN
-        sync: false
-      - key: GH_ACCOUNT_2_OWNER
-        sync: false
-      - key: GH_ACCOUNT_2_REPO
-        sync: false
-      # streamvault-proxy
-      - key: GITHUB_TOKEN
-        sync: false
-      - key: GITHUB_OWNER
-        sync: false
-      - key: GITHUB_REPO
-        sync: false
-      - key: ALLOWED_ORIGIN
-        value: "*"
-      - key: CLOUDFLARE_TUNNEL_TOKEN
+      # autenticação da conta 1: GitHub App (APP_ID, INSTALLATION_ID, PRIVATE_KEY) ou PAT (TOKEN)
+      - key: GH_ACCOUNT_1_TOKEN
         sync: false
       - key: RENDER_EXTERNAL_URL
         fromService:

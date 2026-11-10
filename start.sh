@@ -2,7 +2,7 @@
 APP_PORT="${PORT:-10000}"
 
 echo "[start] A iniciar servidor unificado (porta ${APP_PORT})..."
-node index.js &
+node dispatcher.js &
 NODE_PID=$!
 
 # Aguardar a porta estar realmente activa (até 30s) — elimina race condition

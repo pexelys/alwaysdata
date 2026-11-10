@@ -1,22 +1,12 @@
 {
-  "name": "unified-service",
-  "version": "1.0.0",
+  "name": "catalog-dispatcher",
+  "version": "2.0.0",
   "type": "module",
-  "scripts": {
-    "start": "node index.js"
-  },
-  "engines": {
-    "node": ">=18.0.0"
-  },
+  "main": "dispatcher.js",
+  "scripts": { "start": "node dispatcher.js" },
+  "engines": { "node": ">=18.0.0" },
   "dependencies": {
-    "bip32": "^4.0.0",
-    "bip39": "^3.1.0",
     "dotenv": "^16.4.5",
-    "ethereum-cryptography": "^2.2.1",
-    "express": "^4.19.2",
-    "http-proxy-middleware": "^3.0.0",
-    "qrcode": "^1.5.4",
-    "tiny-secp256k1": "^2.2.3",
-    "tronweb": "^6.0.0"
+    "express": "^4.19.2"
   }
 }

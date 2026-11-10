@@ -1,11 +1,5 @@
 FROM node:20-alpine
 
-# cloudflared — necessário para o streamvault-proxy
-RUN apk add --no-cache curl && \
-    curl -fsSL https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 \
-      -o /usr/local/bin/cloudflared && \
-    chmod +x /usr/local/bin/cloudflared
-
 WORKDIR /app
 
 COPY package.json ./
